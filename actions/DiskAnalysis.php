@@ -1,3 +1,4 @@
+<?php
 namespace Modules\diskanalyser\actions;
 
 use Zabbix\ZabbixApi;
