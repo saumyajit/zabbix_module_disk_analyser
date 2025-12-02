@@ -2,7 +2,7 @@ namespace Modules\diskanalyser\actions;
 
 use Zabbix\ZabbixApi;
 use Zabbix\Core\CAction;
-use Zabbix\Core\CArray;
+use Modules\diskanalyser\views\Data;
 
 class DiskAnalysis extends CAction {
     
@@ -20,8 +20,9 @@ class DiskAnalysis extends CAction {
             $diskData[] = $this->getDiskUsage($host);
         }
 
-        // Pass data to the view
-        $this->view->assign('diskData', $diskData);
+        // Create a view instance and render it
+        $view = new Data($diskData);
+        $view->render();
     }
 
     private function getHosts() {
