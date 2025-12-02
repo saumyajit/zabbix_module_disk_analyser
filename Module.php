@@ -1,5 +1,5 @@
 <?php
-namespace Modules\diskanalysis;
+namespace Modules\diskanalyser;
 
 use Zabbix\Core\CModule;
 use APP;
