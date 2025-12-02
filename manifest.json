@@ -4,7 +4,7 @@
     "name": "Analysis of Disk Usage",
     "version": "1.0",
     "author": "Saumyajit Pramanik",
-    "namespace": "diskanalysis",
+    "namespace": "diskanalyser",
     "url": "https://www.zabbix.com/",
     "description": "Analytical view of Disk usage across hosts",
     "actions": {
