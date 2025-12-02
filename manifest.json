@@ -1,0 +1,16 @@
+{
+    "manifest_version": 2.0,
+    "id": "disk-analysis",
+    "name": "Analysis of Disk Usage",
+    "version": "1.0",
+    "author": "Saumyajit Pramanik",
+    "namespace": "diskanalysis",
+    "url": "https://www.zabbix.com/",
+    "description": "Analytical view of Disk usage across hosts",
+    "actions": {
+        "disk.analyser": {
+            "class": "DiskAnalysis",
+            "view": "data"
+        }
+    }
+}
