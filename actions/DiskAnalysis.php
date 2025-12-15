@@ -16,122 +16,127 @@ class DiskAnalysis extends CController {
         return true;
     }
 
-    /**
-     * Allow only regular Zabbix users, administrators, and super administrators.
-     */
     protected function checkPermissions(): bool {
         $permit_user_types = [USER_TYPE_ZABBIX_USER, USER_TYPE_ZABBIX_ADMIN, USER_TYPE_SUPER_ADMIN];
-
-        // Ensure the constants are correctly defined and user type is checked.
         return in_array($this->getUserType(), $permit_user_types, true);
     }
 
     protected function doAction(): void {
-        // 1. Fetch Data
-        $hosts = $this->getHosts();
-        $diskData = $this->getAllDiskData($hosts);
-
-        // 2. Calculate global summary metrics
+        $diskData = $this->getDiskData();
         $summary = $this->calculateSummary($diskData);
 
-        // 3. Prepare Data for View
         $data = [
             'diskData' => $diskData,
             'summary' => $summary,
-            // Pass the formatting helper to the view for use in template
             'formatBytes' => [$this, 'formatBytes'] 
         ];
 
-        // 4. Pass data to the view template ('data' view defined in manifest)
         $response = new CControllerResponseData($data);
         $this->setResponse($response);
     }
     
-    // --- Helper Functions ---
+    // --- Optimized Data Fetching Helper ---
 
-    private function getHosts() {
-        return API::Host()->get([
-            'output' => ['hostid', 'name']
-        ]);
-    }
-
-    private function getAllDiskData(array $hosts): array {
+    private function getDiskData(): array {
         $diskData = [];
-        foreach ($hosts as $host) {
-            $data = $this->getDiskUsageForHost($host);
-            if (!empty($data)) {
-                $diskData = array_merge($diskData, $data);
+        
+        // Use 'filter' explicitly for the two item key patterns needed for calculation.
+        $items = API::Item()->get([
+            'filter' => ['key_' => ['vfs.fs.size[*,total]', 'vfs.fs.size[*,pused]']],
+            'output' => ['itemid', 'key_', 'name', 'lastvalue', 'hostid'],
+            'selectHosts' => ['hostid', 'name'],
+            'selectTriggers' => 'extend',
+            'monitored' => true,
+            'preservekeys' => true
+        ]);
+        
+        $groupedData = [];
+        $hostNames = [];
+        
+        foreach ($items as $item) {
+            // Match mount point and item type ('total' or 'pused')
+            if (!preg_match('/vfs\.fs\.size\[(.*),(total|pused)\]/i', $item['key_'], $matches)) {
+                continue;
+            }
+
+            $hostId = $item['hostid'];
+            $hostNames[$hostId] = $item['hosts'][0]['name'];
+            
+            $mountPointKey = trim($matches[1], '"') ?: '/';
+            $type = $matches[2]; // 'total' or 'pused'
+
+            $key = $hostId . '|' . $mountPointKey;
+
+            if (!isset($groupedData[$key])) {
+                $groupedData[$key] = [
+                    'hostid' => $hostId,
+                    'mount' => $mountPointKey,
+                    'total' => 0.0,
+                    'pused' => 0.0,
+                    'triggers' => []
+                ];
+            }
+            
+            // Use (float) to ensure correct math later
+            $groupedData[$key][$type] = (float) $item['lastvalue'];
+            
+            // Triggers are usually on the % used item
+            if ($type === 'pused' && !empty($item['triggers'])) {
+                $groupedData[$key]['triggers'] = $item['triggers'];
             }
         }
+
+        // 3. Calculate metrics for the final array
+        foreach ($groupedData as $key => $data) {
+            $hostId = $data['hostid'];
+            $totalRaw = $data['total'];
+            $pused = $data['pused'];
+            
+            if ($totalRaw <= 0 || $pused === 0.0) continue;
+
+            $usedRaw = $totalRaw * ($pused / 100.0);
+            $usagePct = round($pused, 1);
+            
+            // --- Simple/Mocked Prediction ---
+            $growthRate = round(rand(10, 500) / 100, 2); 
+            $bytesRemaining = $totalRaw - $usedRaw;
+            // 1073741824 is 1GB in Bytes
+            $days = $growthRate > 0 ? floor($bytesRemaining / 1073741824 / $growthRate) : 999; 
+
+            $daysUntilFull = match(true) {
+                $days <= 0 => 'Already full',
+                $days > 365 => floor($days / 365) . ' years ' . floor(($days % 365) / 30) . ' months',
+                $days > 30 => floor($days / 30) . ' months ' . ($days % 30) . ' days',
+                default => $days . ' days'
+            };
+
+            $fsCritical = 0;
+            $fsWarnings = 0;
+            foreach ($data['triggers'] as $trigger) {
+                if (in_array($trigger['priority'], [4, 5])) $fsCritical++;
+                elseif (in_array($trigger['priority'], [2, 3])) $fsWarnings++;
+            }
+
+            $diskData[] = [
+                'host' => $hostNames[$hostId],
+                'mount' => $data['mount'],
+                'totalRaw' => $totalRaw,
+                'usedRaw' => $usedRaw,
+                'totalSpace' => $this->formatBytes($totalRaw),
+                'usedSpace' => $this->formatBytes($usedRaw),
+                'usagePct' => $usagePct,
+                'growthRate' => $growthRate,
+                'daysUntilFull' => $daysUntilFull,
+                'fsWarnings' => $fsWarnings,
+                'fsCritical' => $fsCritical
+            ];
+        }
+
         return $diskData;
     }
 
-    private function getDiskUsageForHost($host) {
-        $hostDiskData = [];
 
-        $items = API::Item()->get([
-            'hostids' => $host['hostid'],
-            'search' => ['key_' => 'vfs.fs.size'],
-            'output' => ['itemid', 'key_', 'name', 'lastvalue'],
-            'selectTriggers' => 'extend',
-            'webitems' => true
-        ]);
-
-        foreach ($items as $item) {
-            if (preg_match('/vfs\.fs\.size\[(.*),free\]/i', $item['key_'], $matches)) {
-                $mountPoint = trim($matches[1], '"') ?: '/';
-
-                $total_item_key = str_replace('free', 'total', $item['key_']);
-                $total_item = API::Item()->get([
-                    'hostids' => $host['hostid'],
-                    'search' => ['key_' => $total_item_key],
-                    'output' => ['lastvalue'],
-                    'limit' => 1
-                ]);
-
-                $totalRaw = $total_item[0]['lastvalue'] ?? 0;
-                if ($totalRaw == 0) continue;
-
-                $usedRaw = $totalRaw - $item['lastvalue'];
-                $usagePct = round(($usedRaw / $totalRaw) * 100, 1);
-                
-                // --- Simple/Mocked Prediction ---
-                $growthRate = round(rand(10, 500) / 100, 2); // 0.10 - 5.00 GB/day
-                $days = $growthRate > 0 ? floor(($totalRaw - $usedRaw) / 1073741824 / $growthRate) : 999;
-
-                $daysUntilFull = match(true) {
-                    $days <= 0 => 'Already full',
-                    $days > 365 => floor($days / 365) . ' years ' . floor(($days % 365) / 30) . ' months',
-                    $days > 30 => floor($days / 30) . ' months ' . ($days % 30) . ' days',
-                    default => $days . ' days'
-                };
-
-                $fsCritical = 0;
-                $fsWarnings = 0;
-                if (!empty($item['triggers'])) {
-                    foreach ($item['triggers'] as $trigger) {
-                        if (in_array($trigger['priority'], [4, 5])) $fsCritical++;
-                        elseif (in_array($trigger['priority'], [2, 3])) $fsWarnings++;
-                    }
-                }
-
-                $hostDiskData[] = [
-                    'host' => $host['name'],
-                    'mount' => $mountPoint,
-                    'totalRaw' => $totalRaw,
-                    'usedRaw' => $usedRaw,
-                    'totalSpace' => $this->formatBytes($totalRaw),
-                    'usedSpace' => $this->formatBytes($usedRaw),
-                    'usagePct' => $usagePct,
-                    'growthRate' => $growthRate, // GB/day
-                    'daysUntilFull' => $daysUntilFull,
-                    'fsWarnings' => $fsWarnings,
-                    'fsCritical' => $fsCritical
-                ];
-            }
-        }
-        return $hostDiskData;
-    }
+    // --- Summary and FormatBytes helpers remain the same ---
 
     private function calculateSummary(array $diskData): array {
         $totalRaw = 0.0;
@@ -159,8 +164,11 @@ class DiskAnalysis extends CController {
         $riskyData = array_filter($diskData, fn($item) => $item['growthRate'] > 0);
         
         usort($riskyData, function($a, $b) {
-            // Sort by usage percentage for a simple "risky" ranking
-            return $b['usagePct'] <=> $a['usagePct']; 
+            $aDays = (int) explode(' ', $a['daysUntilFull'])[0];
+            $bDays = (int) explode(' ', $b['daysUntilFull'])[0];
+            
+            if ($aDays === $bDays) return 0;
+            return ($aDays < $bDays) ? -1 : 1; 
         });
 
         return array_slice($riskyData, 0, 5);
