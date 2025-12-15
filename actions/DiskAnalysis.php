@@ -4,7 +4,6 @@ namespace Modules\diskanalyser\actions;
 use CController;
 use CControllerResponseData;
 use API;
-use Zabbix\Core\CView; // Keep for consistency
 
 class DiskAnalysis extends CController {
 
@@ -16,6 +15,9 @@ class DiskAnalysis extends CController {
         return true;
     }
 
+    /**
+     * Allow only Zabbix user types.
+     */
     protected function checkPermissions(): bool {
         $permit_user_types = [USER_TYPE_ZABBIX_USER, USER_TYPE_ZABBIX_ADMIN, USER_TYPE_SUPER_ADMIN];
         return in_array($this->getUserType(), $permit_user_types, true);
@@ -40,9 +42,10 @@ class DiskAnalysis extends CController {
     private function getDiskData(): array {
         $diskData = [];
         
-        // Use 'filter' explicitly for the two item key patterns needed for calculation.
+        // 1. Correct API call: Use 'search' for the base key 'vfs.fs.size'.
+        // No redundant 'search' or problematic 'filter' is used.
         $items = API::Item()->get([
-            'filter' => ['key_' => ['vfs.fs.size[*,total]', 'vfs.fs.size[*,pused]']],
+            'search' => ['key_' => 'vfs.fs.size'],
             'output' => ['itemid', 'key_', 'name', 'lastvalue', 'hostid'],
             'selectHosts' => ['hostid', 'name'],
             'selectTriggers' => 'extend',
@@ -77,7 +80,6 @@ class DiskAnalysis extends CController {
                 ];
             }
             
-            // Use (float) to ensure correct math later
             $groupedData[$key][$type] = (float) $item['lastvalue'];
             
             // Triggers are usually on the % used item
@@ -92,15 +94,17 @@ class DiskAnalysis extends CController {
             $totalRaw = $data['total'];
             $pused = $data['pused'];
             
+            // Ensure we have total bytes and used percentage for calculation
             if ($totalRaw <= 0 || $pused === 0.0) continue;
 
+            // CRITICAL CALCULATION: Used Bytes = Total Bytes * (Pused / 100)
             $usedRaw = $totalRaw * ($pused / 100.0);
+            
             $usagePct = round($pused, 1);
             
             // --- Simple/Mocked Prediction ---
             $growthRate = round(rand(10, 500) / 100, 2); 
             $bytesRemaining = $totalRaw - $usedRaw;
-            // 1073741824 is 1GB in Bytes
             $days = $growthRate > 0 ? floor($bytesRemaining / 1073741824 / $growthRate) : 999; 
 
             $daysUntilFull = match(true) {
