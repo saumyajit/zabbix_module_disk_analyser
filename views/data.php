@@ -7,7 +7,6 @@
  * @var callable $data['formatBytes']
  */
 
-namespace Modules\diskanalyser\views;
 // Use Zabbix component classes
 use Zabbix\Widgets\CWidget;
 use Zabbix\Widgets\CTableInfo;
