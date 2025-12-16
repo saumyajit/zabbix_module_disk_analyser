@@ -95,24 +95,31 @@ class DiskAnalysis extends CController {
             $pused = $data['pused'];
             
             // Ensure we have total bytes and used percentage for calculation
-            if ($totalRaw <= 0 || $pused === 0.0) continue;
+            if ($totalRaw <= 0) continue;
 
             // CRITICAL CALCULATION: Used Bytes = Total Bytes * (Pused / 100)
             $usedRaw = $totalRaw * ($pused / 100.0);
             
             $usagePct = round($pused, 1);
             
-            // --- Simple/Mocked Prediction ---
-            $growthRate = round(rand(10, 500) / 100, 2); 
-            $bytesRemaining = $totalRaw - $usedRaw;
-            $days = $growthRate > 0 ? floor($bytesRemaining / 1073741824 / $growthRate) : 999; 
+			// --- Real Growth Calculation ---
+			$usedItemKey = 'vfs.fs.size[' . $data['mount'] . ',used]';
+			$growthRate = $this->getGrowthRateGBPerDay($usedItemKey, $hostId);
+			
+			$bytesRemaining = $totalRaw - $usedRaw;
+			
+			$days = ($growthRate > 0)
+				? floor(($bytesRemaining / (1024 ** 3)) / $growthRate)
+				: null;			
 
-            $daysUntilFull = match(true) {
-                $days <= 0 => 'Already full',
-                $days > 365 => floor($days / 365) . ' years ' . floor(($days % 365) / 30) . ' months',
-                $days > 30 => floor($days / 30) . ' months ' . ($days % 30) . ' days',
-                default => $days . ' days'
-            };
+			$daysUntilFull = match (true) {
+				$days === null => _('Stable'),
+				$days <= 0 => _('Already full'),
+				$days > 365 => floor($days / 365) . ' years ' . floor(($days % 365) / 30) . ' months',
+				$days > 30 => floor($days / 30) . ' months ' . ($days % 30) . ' days',
+				default => $days . ' days'
+			};
+
 
             $fsCritical = 0;
             $fsWarnings = 0;
@@ -139,6 +146,43 @@ class DiskAnalysis extends CController {
         return $diskData;
     }
 
+	private function getGrowthRateGBPerDay(string $itemKey, int $hostId, int $days = 14): float {
+		$timeFrom = time() - ($days * 86400);
+	
+		$items = API::Item()->get([
+			'output' => ['itemid'],
+			'hostids' => $hostId,
+			'filter' => ['key_' => $itemKey]
+		]);
+	
+		if (empty($items)) {
+			return 0.0;
+		}
+	
+		$history = API::History()->get([
+			'output' => ['clock', 'value'],
+			'itemids' => $items[0]['itemid'],
+			'history' => 3, // numeric unsigned
+			'time_from' => $timeFrom,
+			'sortfield' => 'clock',
+			'sortorder' => 'ASC'
+		]);
+	
+		if (count($history) < 2) {
+			return 0.0;
+		}
+	
+		$first = reset($history);
+		$last  = end($history);
+	
+		$bytesDiff = $last['value'] - $first['value'];
+		$daysDiff  = max(1, ($last['clock'] - $first['clock']) / 86400);
+	
+		$growthGB = ($bytesDiff / $daysDiff) / (1024 ** 3);
+	
+		return round(max(0, $growthGB), 2);
+	}
+	
 
     // --- Summary and FormatBytes helpers remain the same ---
 
@@ -158,7 +202,7 @@ class DiskAnalysis extends CController {
         return [
             'totalStorage' => $this->formatBytes($totalRaw),
             'usedStorage' => $this->formatBytes($usedRaw) . ' (' . $usagePct . '% of total capacity)',
-            'avgGrowth' => (count($diskData) > 0 ? round($totalGrowth / count($diskData), 2) : 0) . ' GB/day',
+            'avgGrowth' => round($totalGrowth, 2) . ' GB/day',
             'usagePct' => $usagePct,
             'riskyFilesystems' => $this->getTopRiskyFilesystems($diskData)
         ];
@@ -167,14 +211,19 @@ class DiskAnalysis extends CController {
     private function getTopRiskyFilesystems(array $diskData): array {
         $riskyData = array_filter($diskData, fn($item) => $item['growthRate'] > 0);
         
-        usort($riskyData, function($a, $b) {
-            $aDays = (int) explode(' ', $a['daysUntilFull'])[0];
-            $bDays = (int) explode(' ', $b['daysUntilFull'])[0];
-            
-            if ($aDays === $bDays) return 0;
-            return ($aDays < $bDays) ? -1 : 1; 
-        });
-
+		usort($riskyData, function ($a, $b) {
+			if (!is_numeric($a['growthRate']) || $a['growthRate'] <= 0) return 1;
+			if (!is_numeric($b['growthRate']) || $b['growthRate'] <= 0) return -1;
+		
+			preg_match('/\d+/', $a['daysUntilFull'], $am);
+			preg_match('/\d+/', $b['daysUntilFull'], $bm);
+		
+			$aDays = $am[0] ?? PHP_INT_MAX;
+			$bDays = $bm[0] ?? PHP_INT_MAX;
+		
+			return $aDays <=> $bDays;
+		});
+		
         return array_slice($riskyData, 0, 5);
     }
     
